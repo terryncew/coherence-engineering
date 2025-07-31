@@ -1,0 +1,376 @@
+“””
+BiModal Controller: Two-Lung Runtime Implementation
+Implements dual-path inference with curvature-aware mixing
+
+Based on the “microbe that breathes two ways” metaphor:
+
+- Fast/Reflex lung: cheap, bounded, always-on
+- Slow/Deliberative lung: deeper, opportunistic, engages when safe
+- Dynamic β mixing based on Φ* optimization and VKD constraints
+  “””
+
+import asyncio
+import time
+import numpy as np
+from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, Tuple, List
+from enum import Enum
+import threading
+from collections import deque
+
+class ProcessingMode(Enum):
+EXPLORATION = “exploration”
+CONSERVATION = “conservation”
+REFLEX = “reflex”
+DAMAGE_CONTROL = “damage_control”
+
+@dataclass
+class BoundarySignals:
+“”“Real-time system health metrics”””
+phi_star: float = 0.0  # Coherence per cost
+vkd: float = 1.0  # Value-knowledge-danger (>0 = safe)
+kappa_hat: float = 0.0  # Curvature index (0-1, higher = more stress)
+epsilon: float = 0.0  # Entropy leak proxy
+
+```
+# Telemetry
+token_rate: float = 0.0
+queue_depth: int = 0
+contradiction_rate: float = 0.0
+retrieval_mismatch: float = 0.0
+phi_volatility: float = 0.0
+
+timestamp: float = field(default_factory=time.time)
+```
+
+@dataclass
+class LungOutput:
+“”“Output from either fast or slow processing lung”””
+content: str
+confidence: float
+tokens_used: int
+processing_time: float
+mode: str
+metadata: Dict[str, Any] = field(default_factory=dict)
+
+class BiModalController:
+“””
+Dual-lung runtime controller that optimizes Φ* while respecting VKD boundaries
+“””
+
+```
+def __init__(self, 
+             alpha_kappa: float = 0.5,
+             alpha_epsilon: float = 0.3,
+             delta: float = 0.1,
+             eta1: float = 0.1,  # Φ* gradient learning rate
+             eta2: float = 0.2,  # κ response rate
+             eta3: float = 0.15, # ε response rate
+             update_interval: float = 1.0):
+    
+    self.alpha_kappa = alpha_kappa
+    self.alpha_epsilon = alpha_epsilon
+    self.delta = delta
+    self.eta1 = eta1
+    self.eta2 = eta2
+    self.eta3 = eta3
+    self.update_interval = update_interval
+    
+    # State
+    self.beta = 0.5  # Mix coefficient: 0 = all fast, 1 = all slow
+    self.signals_history = deque(maxlen=100)
+    self.phi_history = deque(maxlen=20)
+    
+    # Control loop
+    self._running = False
+    self._control_thread = None
+    
+def start_control_loop(self):
+    """Start the continuous control loop"""
+    self._running = True
+    self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
+    self._control_thread.start()
+    
+def stop_control_loop(self):
+    """Stop the control loop"""
+    self._running = False
+    if self._control_thread:
+        self._control_thread.join()
+
+def _control_loop(self):
+    """Main control loop - updates β based on system signals"""
+    while self._running:
+        try:
+            if len(self.signals_history) >= 2:
+                self._update_beta()
+            time.sleep(self.update_interval)
+        except Exception as e:
+            print(f"Control loop error: {e}")
+            
+def _update_beta(self):
+    """Update mixing coefficient β based on current signals"""
+    current = self.signals_history[-1]
+    
+    # Hard safety: VKD breach -> fast-only + damage control
+    if current.vkd < 0:
+        self.beta = 0.0
+        return
+        
+    # Calculate Φ* gradient approximation
+    if len(self.phi_history) >= 2:
+        dphi_dt = self.phi_history[-1] - self.phi_history[-2]
+        dphi_dbeta = dphi_dt  # Simplified - would need proper gradient estimation
+    else:
+        dphi_dbeta = 0
+        
+    # Calculate κ rate of change
+    if len(self.signals_history) >= 2:
+        dkappa_dt = (self.signals_history[-1].kappa_hat - 
+                    self.signals_history[-2].kappa_hat) / self.update_interval
+    else:
+        dkappa_dt = 0
+        
+    # Update β using control law
+    beta_delta = (self.eta1 * np.sign(dphi_dbeta) - 
+                 self.eta2 * dkappa_dt - 
+                 self.eta3 * current.epsilon)
+    
+    self.beta = np.clip(self.beta + beta_delta, 0.0, 1.0)
+    
+def calculate_phi_star(self, signals: BoundarySignals) -> float:
+    """Calculate Φ* using the Bridge Equation"""
+    I_c = 1.0 - signals.contradiction_rate  # Simplified coherence proxy
+    denominator = (1 + 
+                  self.alpha_kappa * signals.kappa_hat + 
+                  self.alpha_epsilon * signals.epsilon + 
+                  self.delta)
+    return I_c / denominator
+
+def update_signals(self, signals: BoundarySignals):
+    """Update system signals and recalculate Φ*"""
+    signals.phi_star = self.calculate_phi_star(signals)
+    self.signals_history.append(signals)
+    self.phi_history.append(signals.phi_star)
+    
+async def route_request(self, request: str, context: Dict[str, Any] = None) -> Tuple[LungOutput, LungOutput, float]:
+    """
+    Route a request through both lungs and return outputs + current β
+    """
+    context = context or {}
+    
+    # Spawn both processing paths concurrently
+    fast_task = asyncio.create_task(self._fast_lung_process(request, context))
+    slow_task = asyncio.create_task(self._slow_lung_process(request, context))
+    
+    try:
+        # Wait for both with timeout handling
+        fast_output = await asyncio.wait_for(fast_task, timeout=5.0)
+        
+        # Slow lung timeout based on current β and system health
+        slow_timeout = 30.0 * self.beta if self.beta > 0.1 else 1.0
+        try:
+            slow_output = await asyncio.wait_for(slow_task, timeout=slow_timeout)
+        except asyncio.TimeoutError:
+            slow_output = LungOutput(
+                content="[TIMEOUT]", 
+                confidence=0.0, 
+                tokens_used=0, 
+                processing_time=slow_timeout,
+                mode="slow_timeout"
+            )
+            
+    except asyncio.TimeoutError:
+        # If even fast lung times out, we're in trouble
+        fast_output = LungOutput(
+            content="[SYSTEM_OVERLOAD]", 
+            confidence=0.0, 
+            tokens_used=0, 
+            processing_time=5.0,
+            mode="fast_timeout"
+        )
+        slow_output = fast_output
+        
+    return fast_output, slow_output, self.beta
+
+async def _fast_lung_process(self, request: str, context: Dict[str, Any]) -> LungOutput:
+    """Fast/Reflex processing lung"""
+    start_time = time.time()
+    
+    # Simulate fast processing with constraints
+    # - Tight token cap (50-200 tokens)
+    # - Low temperature (0.2-0.3)
+    # - Pre-approved tools only
+    # - Fixed schema
+    
+    max_tokens = int(200 * (1 - self.beta))  # Less tokens as β increases
+    temperature = 0.25
+    
+    # Simulate processing time
+    await asyncio.sleep(0.1 + np.random.exponential(0.2))
+    
+    # Generate safe, templated response
+    safe_content = self._generate_safe_response(request, max_tokens)
+    
+    return LungOutput(
+        content=safe_content,
+        confidence=0.7,  # Reasonable confidence for safe answers
+        tokens_used=max_tokens // 2,
+        processing_time=time.time() - start_time,
+        mode="fast_reflex",
+        metadata={"temperature": temperature, "max_tokens": max_tokens}
+    )
+
+async def _slow_lung_process(self, request: str, context: Dict[str, Any]) -> LungOutput:
+    """Slow/Deliberative processing lung"""
+    start_time = time.time()
+    
+    # Only engage if β > threshold and system is stable
+    if self.beta < 0.1 or (self.signals_history and self.signals_history[-1].vkd < 0.5):
+        return LungOutput(
+            content="[INHIBITED]",
+            confidence=0.0,
+            tokens_used=0,
+            processing_time=0.001,
+            mode="slow_inhibited"
+        )
+    
+    # Deliberative processing with expanded resources
+    max_tokens = int(800 * self.beta)  # More tokens as β increases
+    temperature = 0.6 + 0.4 * self.beta  # Higher temp for exploration
+    
+    # Simulate deeper processing time
+    processing_delay = 1.0 + np.random.exponential(2.0 * self.beta)
+    await asyncio.sleep(processing_delay)
+    
+    # Generate richer response
+    rich_content = self._generate_rich_response(request, max_tokens, temperature)
+    
+    return LungOutput(
+        content=rich_content,
+        confidence=0.85,  # Higher confidence from deeper processing
+        tokens_used=max_tokens // 3,
+        processing_time=time.time() - start_time,
+        mode="slow_deliberative",
+        metadata={"temperature": temperature, "max_tokens": max_tokens}
+    )
+
+def _generate_safe_response(self, request: str, max_tokens: int) -> str:
+    """Generate a safe, templated response (simulate)"""
+    # In real implementation, this would use constrained generation
+    templates = [
+        f"Based on standard guidelines, here's a concise response to '{request[:50]}...'",
+        f"Following established patterns, I can provide: [structured answer for '{request[:30]}...']",
+        f"Using cached knowledge, the key points are: [safe summary for '{request[:40]}...']"
+    ]
+    return np.random.choice(templates)
+
+def _generate_rich_response(self, request: str, max_tokens: int, temperature: float) -> str:
+    """Generate a rich, detailed response (simulate)"""
+    # In real implementation, this would use expanded retrieval and reasoning
+    approaches = [
+        f"Let me explore this deeply. For '{request[:30]}...', I'll consider multiple angles: [detailed analysis with tools, retrieval, chain-of-thought...]",
+        f"This requires nuanced thinking about '{request[:40]}...'. Drawing from broader context: [comprehensive response with citations, examples, counterpoints...]",
+        f"Taking time to reason through '{request[:35]}...': [step-by-step analysis with tool use, verification, synthesis...]"
+    ]
+    return np.random.choice(approaches)
+
+def mix_outputs(self, fast: LungOutput, slow: LungOutput, 
+               mix_beta: float = None) -> LungOutput:
+    """
+    Mix outputs from both lungs based on current β and system state
+    """
+    if mix_beta is None:
+        mix_beta = self.beta
+        
+    current_signals = self.signals_history[-1] if self.signals_history else None
+    
+    # Safety override: if VKD low or κ high, prefer fast output
+    if current_signals and (current_signals.vkd < 0.3 or current_signals.kappa_hat > 0.7):
+        mix_beta = 0.2
+        
+    # If slow lung failed/timeout, use fast
+    if slow.content in ["[TIMEOUT]", "[INHIBITED]"]:
+        mix_beta = 0.0
+        
+    # Weighted mixing
+    if mix_beta < 0.1:
+        # Mostly fast
+        mixed_content = fast.content
+        mixed_confidence = fast.confidence
+    elif mix_beta > 0.9:
+        # Mostly slow
+        mixed_content = slow.content
+        mixed_confidence = slow.confidence
+    else:
+        # True blend - in real implementation, this would be semantic mixing
+        mixed_content = f"[FAST: {fast.content[:100]}...] [SLOW: {slow.content[:200]}...]"
+        mixed_confidence = (1 - mix_beta) * fast.confidence + mix_beta * slow.confidence
+        
+    return LungOutput(
+        content=mixed_content,
+        confidence=mixed_confidence,
+        tokens_used=fast.tokens_used + slow.tokens_used,
+        processing_time=max(fast.processing_time, slow.processing_time),
+        mode=f"mixed_beta_{mix_beta:.2f}",
+        metadata={
+            "fast_meta": fast.metadata,
+            "slow_meta": slow.metadata,
+            "mix_beta": mix_beta,
+            "signals": current_signals.__dict__ if current_signals else None
+        }
+    )
+```
+
+# Example usage and testing
+
+async def demo_bimodal_controller():
+“”“Demonstrate the BiModal Controller”””
+controller = BiModalController()
+controller.start_control_loop()
+
+```
+try:
+    # Simulate some requests with varying system load
+    test_requests = [
+        "What is the capital of France?",
+        "Explain quantum computing in detail",
+        "How do I fix this complex coding error?",
+        "What's 2+2?",
+        "Write a comprehensive analysis of climate change"
+    ]
+    
+    for i, request in enumerate(test_requests):
+        print(f"\n--- Request {i+1}: {request} ---")
+        
+        # Simulate system signals (would come from real telemetry)
+        signals = BoundarySignals(
+            kappa_hat=np.random.beta(2, 5),  # Usually low stress
+            epsilon=np.random.beta(1, 4),
+            vkd=np.random.beta(5, 2),  # Usually safe
+            token_rate=np.random.exponential(10),
+            queue_depth=np.random.poisson(3),
+            contradiction_rate=np.random.beta(1, 10)
+        )
+        
+        controller.update_signals(signals)
+        
+        # Route request through both lungs
+        fast_out, slow_out, beta = await controller.route_request(request)
+        
+        # Mix outputs
+        mixed_out = controller.mix_outputs(fast_out, slow_out)
+        
+        print(f"β = {beta:.3f}, Φ* = {signals.phi_star:.3f}, κ = {signals.kappa_hat:.3f}")
+        print(f"Fast: {fast_out.content[:100]}...")
+        print(f"Slow: {slow_out.content[:100]}...")
+        print(f"Mixed: {mixed_out.content[:150]}...")
+        
+        # Brief pause between requests
+        await asyncio.sleep(0.5)
+        
+finally:
+    controller.stop_control_loop()
+```
+
+if **name** == “**main**”:
+asyncio.run(demo_bimodal_controller())
